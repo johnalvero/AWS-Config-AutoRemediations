@@ -1,0 +1,143 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Parameters:
+  EnablePort22Remediation:
+    Type: String
+    Description: Whether to enable or disable the remediation for port 22
+    Default: 'Enable'
+    AllowedValues:
+      - 'Enable'
+      - 'Disable'
+  EnablePort3389Remediation:
+    Type: String
+    Description: Whether to enable or disable the remediation for port 3389
+    Default: 'Enable'
+    AllowedValues:
+      - 'Enable'
+      - 'Disable'
+  EnableDefaultSecGroupRemediation:
+    Type: String
+    Description: Whether to enable or disable the remediation for the default security group
+    Default: 'Enable'
+    AllowedValues:
+      - 'Enable'
+      - 'Disable'
+Conditions:
+  EnablePort22Rem: !Equals
+    - !Ref EnablePort22Remediation
+    - 'Enable'
+  EnablePort3389Rem: !Equals
+    - !Ref EnablePort3389Remediation
+    - 'Enable'
+  EnableDefaultSecGroupRem: !Equals
+    - !Ref EnableDefaultSecGroupRemediation
+    - 'Enable'
+Resources:
+  SSMAutomaticRemediationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Action: 'sts:AssumeRole'
+          Effect: Allow
+          Principal:
+            Service:
+            - ssm.amazonaws.com
+          Sid: ''
+      Path: '/'
+      Policies:
+      - PolicyName: 'DescribeAndRevokeInboundRules'
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Action:
+            - ec2:DescribeSecurityGroups
+            - ec2:RevokeSecurityGroupIngress
+            Resource: '*'
+            Effect: Allow
+  Port22Remediation:
+    Type: "AWS::Config::RemediationConfiguration"
+    Condition: EnablePort22Rem
+    Properties:
+      ConfigRuleName: "CIS-SecurityGroupsMustRestrictSshTraffic"
+      Automatic: True
+      Parameters:
+        AutomationAssumeRole:
+          StaticValue:
+            Values: 
+              - !GetAtt SSMAutomaticRemediationRole.Arn
+        SecurityGroupIds:
+          ResourceValue:
+            Value: "RESOURCE_ID"
+      ResourceType: "AWS::EC2::SecurityGroup"
+      ExecutionControls:
+        SsmControls:
+          ConcurrentExecutionRatePercentage: 2
+          ErrorPercentage: 5
+      TargetType: "SSM_DOCUMENT"
+      TargetId: "AWS-DisableIncomingSSHOnPort22"
+      TargetVersion: "1"
+      MaximumAutomaticAttempts: 5
+      RetryAttemptSeconds: 60
+
+  Port3389Remediation:
+    Type: "AWS::Config::RemediationConfiguration"
+    Condition: EnablePort3389Rem
+    Properties:
+      ConfigRuleName: "CIS-SecurityGroupsMustDisallowTcpTraffic"
+      TargetType: "SSM_DOCUMENT"
+      TargetId: "AWS-DisablePublicAccessForSecurityGroup"
+      TargetVersion: "1"
+      Parameters:
+        AutomationAssumeRole:
+          StaticValue:
+            Values:
+              - !GetAtt SSMAutomaticRemediationRole.Arn
+        GroupId:
+          ResourceValue:
+            Value: "RESOURCE_ID"
+        IpAddressToBlock:
+          StaticValue:
+            Values: []
+        SecurityGroupIds:
+          StaticValue:
+            Values: []
+      Automatic: True
+      ExecutionControls:
+        SsmControls:
+          ConcurrentExecutionRatePercentage: 2
+          ErrorPercentage: 5
+      MaximumAutomaticAttempts: 5
+      RetryAttemptSeconds: 60
+
+  DefaultSecgroupRemediation:
+    Type: "AWS::Config::RemediationConfiguration"
+    Condition: EnableDefaultSecGroupRem
+    Properties:
+      ConfigRuleName: "VpcDefaultSecurityGroupClosed"
+      TargetType: "SSM_DOCUMENT"
+      TargetId: "AWSConfigRemediation-RemoveVPCDefaultSecurityGroupRules"
+      TargetVersion: "1"
+      Parameters:
+        AutomationAssumeRole:
+          StaticValue:
+            Values:
+              - !GetAtt SSMAutomaticRemediationRole.Arn
+        GroupId:
+          ResourceValue:
+            Value: "RESOURCE_ID"
+        IpAddressToBlock:
+          StaticValue:
+            Values: []
+        SecurityGroupIds:
+          StaticValue:
+            Values: []
+      Automatic: True
+      ExecutionControls:
+        SsmControls:
+          ConcurrentExecutionRatePercentage: 2
+          ErrorPercentage: 5
+      MaximumAutomaticAttempts: 5
+      RetryAttemptSeconds: 60
+

@@ -22,6 +22,14 @@ Parameters:
     AllowedValues:
       - 'Enable'
       - 'Disable'
+  EnableAllAnySecGroupRemediation:
+    Type: String
+    Description: Whether to enable or disable the remediation for the open Security Group allow ALL Traffic coming from Any source
+    Default: 'Enable'
+    AllowedValues:
+      - 'Enable'
+      - 'Disable'
+
 Conditions:
   EnablePort22Rem: !Equals
     - !Ref EnablePort22Remediation
@@ -31,6 +39,9 @@ Conditions:
     - 'Enable'
   EnableDefaultSecGroupRem: !Equals
     - !Ref EnableDefaultSecGroupRemediation
+    - 'Enable'
+  EnableAllAnySecGroupRem: !Equals
+    - !Ref EnableAllAnySecGroupRemediation
     - 'Enable'
 Resources:
   SSMAutomaticRemediationRole:
@@ -141,3 +152,310 @@ Resources:
       MaximumAutomaticAttempts: 5
       RetryAttemptSeconds: 60
 
+#### Remediation for Open ports for ALLTraffic - Anywhere and ALL TCP Anywhere
+
+  SecGroupAllAnyConfigRuleLambdaRole:
+      Type: 'AWS::IAM::Role'
+      Condition: EnableAllAnySecGroupRem
+      Properties:
+        AssumeRolePolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: lambda.amazonaws.com
+              Action: 'sts:AssumeRole'
+        ManagedPolicyArns:
+          - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        Policies:
+          - PolicyName: SecGroupAllAnyConfigRuleLambdaRolePolicy
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - config:PutEvaluations
+                    - ec2:DescribeSecurityGroups
+                  Resource: '*'
+  SecGroupAllAnyConfigRuleLambda:
+      Type: 'AWS::Lambda::Function'
+      Condition: EnableAllAnySecGroupRem
+      Properties:
+        Code:
+          ZipFile: |
+            import boto3
+            import json
+
+            def evaluate_compliance(config_item, **kwargs):
+                client = boto3.client('ec2')
+                security_group_id = config_item['configuration']['groupId']
+                security_group = client.describe_security_groups(GroupIds=[security_group_id])['SecurityGroups'][0]
+
+                for rule in security_group['IpPermissions']:
+                    if (rule.get('IpProtocol') == '-1'):
+                        for IpRange in rule.get('IpRanges'):
+                            try:
+                                rDescription = IpRange['Description']
+                            except:
+                                rDescription = 'xxx'
+                            if rDescription != 'OKAY' and IpRange['CidrIp'] == '0.0.0.0/0':
+                                return 'NON_COMPLIANT'
+
+                    if (rule.get('IpProtocol') == 'tcp'):
+                        for IpRange in rule.get('IpRanges'):
+                            try:
+                                rDescription = IpRange['Description']
+                            except:
+                                rDescription = 'xxx'
+                            if rDescription != 'OKAY' and IpRange['CidrIp'] == '0.0.0.0/0' and rule.get('FromPort') == 0 and rule.get('ToPort') == 65535:
+                                return 'NON_COMPLIANT'                    
+
+                return 'COMPLIANT'
+
+            def lambda_handler(event, context):
+                invoking_event = json.loads(event['invokingEvent'])
+                rule_parameters = json.loads(event['ruleParameters'])
+                result_token = event['resultToken']
+                config_item = invoking_event['configurationItem']
+
+                if config_item['resourceType'] != 'AWS::EC2::SecurityGroup':
+                    return {'compliance_type': 'NOT_APPLICABLE', 'result_token': result_token}
+                
+                compliance_value = evaluate_compliance(config_item, rule_parameters=rule_parameters)
+
+                config = boto3.client('config')
+                response = config.put_evaluations(
+                    Evaluations=[
+                        {
+                            'ComplianceResourceType': config_item['resourceType'],
+                            'ComplianceResourceId': config_item['resourceId'],
+                            'ComplianceType': compliance_value,
+                            'OrderingTimestamp': config_item['configurationItemCaptureTime']
+                        },
+                    ],
+                    ResultToken=result_token
+                )
+        Handler: index.lambda_handler
+        Role: !GetAtt SecGroupAllAnyConfigRuleLambdaRole.Arn
+        Runtime: python3.9
+  SecGroupAllAnyConfigRuleLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Condition: EnableAllAnySecGroupRem
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt SecGroupAllAnyConfigRuleLambda.Arn
+      Principal: config.amazonaws.com
+      SourceAccount: !Ref "AWS::AccountId"
+
+  SecGroupAllAnyConfigRule:
+    Type: 'AWS::Config::ConfigRule'
+    Condition: EnableAllAnySecGroupRem
+    Properties:
+      ConfigRuleName: SecGroupAllAny
+      Scope:
+        ComplianceResourceTypes:
+          - 'AWS::EC2::SecurityGroup'
+      Source:
+        Owner: CUSTOM_LAMBDA
+        SourceIdentifier: !GetAtt SecGroupAllAnyConfigRuleLambda.Arn
+        SourceDetails:
+          - EventSource: aws.config
+            MessageType: ConfigurationItemChangeNotification
+          - EventSource: aws.config
+            MessageType: OversizedConfigurationItemChangeNotification
+      InputParameters: '{}'
+
+  # Todo: Check if this resource can be removed and use the above SSMAutomaticRemediationRole instead. Do not forget to add AuthorizeSecurityGroupIngress above
+  SecGroupAllAnySSMDocRemediationRole:
+      Type: 'AWS::IAM::Role'
+      Condition: EnableAllAnySecGroupRem
+      Properties:
+        AssumeRolePolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: ssm.amazonaws.com
+              Action: 'sts:AssumeRole'
+        Policies:
+          - PolicyName: SecGroupAllAnySSMDocRemediationRolePolicy
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - ec2:RevokeSecurityGroupIngress
+                    - ec2:AuthorizeSecurityGroupIngress
+                    - ec2:DescribeSecurityGroups
+                  Resource: '*'
+
+
+  SecGroupAllAnySSMDocRemediation:
+    Type: "AWS::SSM::Document"
+    Condition: EnableAllAnySecGroupRem
+    Properties:
+      Name: "SecGroupAllAnySSMDocRemediation"
+      DocumentType: "Automation"
+      Content: 
+        description: |+
+          #### Document Name - SecGroupAllowAllRemediate
+
+          ## What does this document do?
+          An SSM Automation Document that remediates **All Traffic from anywhere** findings in AWS Config. Remediation is done by replacing the source IP address with *OfficeIP* parameter and updating the security group description with *RemediationDescription* parameter.
+
+          In cases where there is a business need to allow such kind of traffic, an exception is possible by applying a description indicated in the *Description* parameter.
+
+          ## Input Parameters
+          * SecurityGroupIds: (Required) A comma separated list of security group IDs to restrict SSH traffic for
+          * AutomationAssumeRole: (Optional) The ARN of the role that allows Automation to perform the actions on your behalf
+          * OfficeIP: (Required) This IP address will be used to restrict the offending security group rule
+          * RemediationMessage: The message tag that will be applied to the offending security group rule
+
+          ## Output Parameters
+          * step1.RestrictedSecurityGroupIds: The list of the security group IDs with offending allow All traffic from anywhere
+
+          ## Minimum Permissions Required
+          * `ec2:DescribeSecurityGroups` and `ec2:RevokeSecurityGroupIngress` on the target security groups
+        schemaVersion: '0.3'
+        assumeRole: '{{AutomationAssumeRole}}'
+        outputs:
+          - step1.RestrictedSecurityGroupIds
+        parameters:
+          SecurityGroupIds:
+            type: StringList
+            allowedPattern: '^sg-[a-z0-9]{8,17}$'
+          AutomationAssumeRole:
+            type: String
+            default: ''
+            allowedPattern: '^arn:aws(-cn|-us-gov)?:iam::\d{12}:role\/[\w+=,.@_\/-]+|^$'
+          OfficeIP:
+            type: String
+            description: The IP address that will be used to update the source IP of the security group rule
+          RemediationMessage:
+            type: String
+            description: Message that will used to update the offending security group rule
+        mainSteps:
+          - name: step1
+            action: 'aws:executeScript'
+            onFailure: Abort
+            isCritical: true
+            isEnd: true
+            timeoutSeconds: 600
+            inputs:
+              Runtime: python3.6
+              Handler: script_handler
+              InputPayload:
+                SecurityGroupIds: '{{SecurityGroupIds}}'
+                OfficeIP: '{{OfficeIP}}'
+                RemediationMessage: '{{RemediationMessage}}'
+              Script: |
+                import boto3
+
+                ec2_resource = boto3.resource("ec2")
+                ec2_client = boto3.client("ec2")
+
+                def script_handler(event, context):
+                  sg_ids = event["SecurityGroupIds"]
+                  Restricted_sg_ids = []
+                  Unrestricted_sg_ids = []
+                  successful = True
+                  errorMsg = "N/A"
+                  currentSg = None
+
+                  try:
+                    for sg_id in sg_ids:
+                      currentSg = sg_id
+                      sg_description = ec2_client.describe_security_groups(GroupIds=[sg_id])
+                      sg_resource = ec2_resource.SecurityGroup(sg_id)
+                      has_unrestricted, unrestricted_ipv4_ranges = find_open_sg(sg_description)
+                      
+                      if has_unrestricted:
+                        update_response = sg_resource.revoke_ingress(
+                        GroupId=sg_id,
+                        IpPermissions=[{
+                        'IpProtocol': '-1',
+                        'IpRanges': unrestricted_ipv4_ranges
+                        }],
+                        DryRun=False
+                        )
+                        
+                        authorize_response = sg_resource.authorize_ingress(
+                        GroupId=sg_id,
+                        IpPermissions=[{
+                        'IpProtocol': '-1',
+                        'IpRanges': [{'CidrIp': event["OfficeIP"], 'Description': event["RemediationMessage"]}]
+                        }],
+                        DryRun=False
+                        )
+                        
+                        
+                        if update_response and 'Return' in update_response and update_response['Return']:
+                          Restricted_sg_ids.append(sg_id)
+                        else:
+                          successful = False
+                          Unrestricted_sg_ids.append(sg_id)
+
+                  except Exception as e:
+                    errorMsg = str(e)
+                    successful = False
+                    if "InvalidGroup.NotFound" in errorMsg:
+                      errorMsg = "The security group '{}' does not exist".format(currentSg)
+
+                  if not successful:
+                      raise Exception(
+                        "Unable to restrict one or more of the security groups Unrestricted_sg_ids: '{}', Restricted_sg_ids: '{}'. errorMsg: '{}'".format(
+                                Unrestricted_sg_ids, Restricted_sg_ids, errorMsg))
+                  
+                  return {"RestrictedSecurityGroupIds": Restricted_sg_ids}
+
+                  
+                def find_open_sg(sg_description):
+                  has_unrestricted = False
+                  unrestricted_ipv4_ranges = []
+
+
+                  for rule in sg_description["SecurityGroups"][0]['IpPermissions']:
+                      if (rule.get('IpProtocol') == '-1'):
+                          for IpRange in rule.get('IpRanges'):
+                              try:
+                                  rDescription = IpRange['Description']
+                              except:
+                                  rDescription = 'xxx'
+                              if rDescription != 'OKAY' and IpRange['CidrIp'] == '0.0.0.0/0':
+                                  unrestricted_ipv4_ranges.append(IpRange)
+                                  has_unrestricted = True
+                  return has_unrestricted, unrestricted_ipv4_ranges
+            outputs:
+              - Name: RestrictedSecurityGroupIds
+                Selector: $.Payload.RestrictedSecurityGroupIds
+                Type: StringList
+
+
+  SecGroupAllAnyRemediationConfiguration:
+    Type: AWS::Config::RemediationConfiguration
+    Condition: EnableAllAnySecGroupRem
+    Properties:
+      ConfigRuleName: !Ref SecGroupAllAnyConfigRule
+      TargetType: "SSM_DOCUMENT"
+      TargetId: !Ref SecGroupAllAnySSMDocRemediation
+      TargetVersion: '$LATEST'
+      Parameters:
+        AutomationAssumeRole:
+          StaticValue:
+            Values:
+              - !GetAtt SecGroupAllAnySSMDocRemediationRole.Arn
+        OfficeIP:
+          StaticValue:
+            Values:
+              - 1.1.1.1/32
+        RemediationMessage:
+          StaticValue:
+            Values:
+              - Audit Finding - DO NOT ALLOW 0.0.0.0/0
+        SecurityGroupIds:
+          ResourceValue:
+            Value: RESOURCE_ID
+      Automatic: true
+      MaximumAutomaticAttempts: 5
+      RetryAttemptSeconds: 60
+    

@@ -65,6 +65,7 @@ Resources:
           - Action:
             - ec2:DescribeSecurityGroups
             - ec2:RevokeSecurityGroupIngress
+            - ec2:RevokeSecurityGroupEgress
             Resource: '*'
             Effect: Allow
   Port22Remediation:
@@ -177,8 +178,15 @@ Resources:
                     - config:PutEvaluations
                     - ec2:DescribeSecurityGroups
                   Resource: '*'
+                - Effect: Allow
+                  Action:
+                    - logs:CreateLogGroup
+                    - logs:CreateLogStream
+                    - logs:PutLogEvents
+                  Resource: "arn:aws:logs:*:*:*"
   SecGroupAllAnyConfigRuleLambda:
       Type: 'AWS::Lambda::Function'
+      DependsOn: SecGroupAllAnyConfigRuleLambdaRole
       Condition: EnableAllAnySecGroupRem
       Properties:
         Code:
@@ -207,7 +215,8 @@ Resources:
                                 rDescription = IpRange['Description']
                             except:
                                 rDescription = 'xxx'
-                            if rDescription != 'OKAY' and IpRange['CidrIp'] == '0.0.0.0/0' and rule.get('FromPort') == 0 and rule.get('ToPort') == 65535:
+                            #if rDescription != 'OKAY' and IpRange['CidrIp'] == '0.0.0.0/0' and rule.get('FromPort') == 0 and rule.get('ToPort') == 65535:
+                            if rDescription != 'OKAY' and IpRange['CidrIp'] == '0.0.0.0/0' and (rule.get('FromPort') <= 22 <= rule.get('ToPort') or (rule.get('FromPort') <= 3389 <= rule.get('ToPort'))):
                                 return 'NON_COMPLIANT'                    
 
                 return 'COMPLIANT'
@@ -246,6 +255,7 @@ Resources:
       FunctionName: !GetAtt SecGroupAllAnyConfigRuleLambda.Arn
       Principal: config.amazonaws.com
       SourceAccount: !Ref "AWS::AccountId"
+    DependsOn: SecGroupAllAnyConfigRuleLambda
 
   SecGroupAllAnyConfigRule:
     Type: 'AWS::Config::ConfigRule'
@@ -264,6 +274,7 @@ Resources:
           - EventSource: aws.config
             MessageType: OversizedConfigurationItemChangeNotification
       InputParameters: '{}'
+    DependsOn: SecGroupAllAnyConfigRuleLambdaPermission
 
   # Todo: Check if this resource can be removed and use the above SSMAutomaticRemediationRole instead. Do not forget to add AuthorizeSecurityGroupIngress above
   SecGroupAllAnySSMDocRemediationRole:
@@ -285,6 +296,7 @@ Resources:
                 - Effect: Allow
                   Action:
                     - ec2:RevokeSecurityGroupIngress
+                    - ec2:RevokeSecurityGroupEgress
                     - ec2:AuthorizeSecurityGroupIngress
                     - ec2:DescribeSecurityGroups
                   Resource: '*'
@@ -294,7 +306,7 @@ Resources:
     Type: "AWS::SSM::Document"
     Condition: EnableAllAnySecGroupRem
     Properties:
-      Name: "SecGroupAllAnySSMDocRemediation"
+      #Name: "SecGroupAllAnySSMDocRemediation"
       DocumentType: "Automation"
       Content: 
         description: |+
@@ -447,11 +459,11 @@ Resources:
         OfficeIP:
           StaticValue:
             Values:
-              - 1.1.1.1/32
+              - 202.57.56.242/32
         RemediationMessage:
           StaticValue:
             Values:
-              - Audit Finding - DO NOT ALLOW 0.0.0.0/0
+              - ITSS Audit Finding - DO NOT ALLOW 0.0.0.0/0
         SecurityGroupIds:
           ResourceValue:
             Value: RESOURCE_ID

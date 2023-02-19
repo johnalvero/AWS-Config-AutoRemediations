@@ -29,6 +29,27 @@ Parameters:
     AllowedValues:
       - 'Enable'
       - 'Disable'
+  EnableKMSRotationRemediation:
+    Type: String
+    Description: Whether to enable or disable the remediation for KMS key rotation
+    Default: 'Enable'
+    AllowedValues:
+      - 'Enable'
+      - 'Disable'
+  # EnableCloudTrailKMSEncryptionRemediation:
+  #   Type: String
+  #   Description: Whether to enable or disable the remediation for CloudTrail KMS Encryption
+  #   Default: 'Enable'
+  #   AllowedValues:
+  #     - 'Enable'
+  #     - 'Disable'
+  EnableCloudTrailValidationRemediation:
+    Type: String
+    Description: Whether to enable or disable the remediation for CloudTrail log file validation
+    Default: 'Enable'
+    AllowedValues:
+      - 'Enable'
+      - 'Disable'
 
 Conditions:
   EnablePort22Rem: !Equals
@@ -42,6 +63,15 @@ Conditions:
     - 'Enable'
   EnableAllAnySecGroupRem: !Equals
     - !Ref EnableAllAnySecGroupRemediation
+    - 'Enable'
+  EnableKMSRotationRem: !Equals
+    - !Ref EnableKMSRotationRemediation
+    - 'Enable'
+  # EnableCloudTrailKMSEncryptionRem: !Equals
+  #   - !Ref EnableCloudTrailKMSEncryptionRemediation
+  #   - 'Enable'
+  EnableCloudTrailValidationRem: !Equals
+    - !Ref EnableCloudTrailValidationRemediation
     - 'Enable'
 Resources:
   SSMAutomaticRemediationRole:
@@ -66,6 +96,12 @@ Resources:
             - ec2:DescribeSecurityGroups
             - ec2:RevokeSecurityGroupIngress
             - ec2:RevokeSecurityGroupEgress
+            - cloudtrail:UpdateTrail
+            - cloudtrail:GetTrail
+            - kms:ListKeys
+            - kms:DescribeKey
+            - kms:EnableKeyRotation
+            - kms:GetKeyRotationStatus
             Resource: '*'
             Effect: Allow
   Port22Remediation:
@@ -299,6 +335,7 @@ Resources:
                     - ec2:RevokeSecurityGroupEgress
                     - ec2:AuthorizeSecurityGroupIngress
                     - ec2:DescribeSecurityGroups
+                    - kms:EnableKeyRotation
                   Resource: '*'
 
 
@@ -470,4 +507,84 @@ Resources:
       Automatic: true
       MaximumAutomaticAttempts: 5
       RetryAttemptSeconds: 60
-    
+  
+  # New remediations for CMK key rotation, cloudtrail logs encryption & cloudtrail log file validation
+
+  KMSRotationRemediation:
+    Type: "AWS::Config::RemediationConfiguration"
+    Condition: EnableKMSRotationRem
+    Properties:
+      ConfigRuleName: "CmkBackingKeyRotationEnabled"
+      Automatic: True
+      Parameters:
+        AutomationAssumeRole:
+          StaticValue:
+            Values: 
+              - !GetAtt SSMAutomaticRemediationRole.Arn
+        KeyId:
+          ResourceValue:
+            Value: "RESOURCE_ID"
+      ResourceType: "AWS::KMS::Key"
+      ExecutionControls:
+        SsmControls:
+          ConcurrentExecutionRatePercentage: 2
+          ErrorPercentage: 5
+      TargetType: "SSM_DOCUMENT"
+      TargetId: "AWSConfigRemediation-EnableKeyRotation"
+      TargetVersion: "1"
+      MaximumAutomaticAttempts: 5
+      RetryAttemptSeconds: 60
+
+  # CloudTrailKMSEncryptionRemediation:
+  #   Type: "AWS::Config::RemediationConfiguration"
+  #   Condition: EnableCloudTrailKMSEncryptionRem
+  #   Properties:
+  #     ConfigRuleName: "CloudTrailEncryptionEnabled"
+  #     Automatic: True
+  #     Parameters:
+  #       AutomationAssumeRole:
+  #         StaticValue:
+  #           Values: 
+  #             - !GetAtt SSMAutomaticRemediationRole.Arn
+  #       TrailNames:
+  #         ResourceValue:
+  #           Value: "RESOURCE_ID"
+  #       KmsKeyId:
+  #         StaticValue:
+  #           Values:
+  #             - ????
+  #     ResourceType: "AWS::CloudTrail::Trail"
+  #     ExecutionControls:
+  #       SsmControls:
+  #         ConcurrentExecutionRatePercentage: 2
+  #         ErrorPercentage: 5
+  #     TargetType: "SSM_DOCUMENT"
+  #     TargetId: "AWS-EnableCloudTrailKmsEncryption"
+  #     TargetVersion: "1"
+  #     MaximumAutomaticAttempts: 5
+  #     RetryAttemptSeconds: 60
+
+  CloudTrailValidationRemediation:
+    Type: "AWS::Config::RemediationConfiguration"
+    Condition: EnableCloudTrailValidationRem
+    Properties:
+      ConfigRuleName: "CloudTrailLogFileValidationEnabled"
+      Automatic: True
+      Parameters:
+        AutomationAssumeRole:
+          StaticValue:
+            Values: 
+              - !GetAtt SSMAutomaticRemediationRole.Arn
+        TrailName:
+          ResourceValue:
+            Value: "RESOURCE_ID"
+      ResourceType: "AWS::CloudTrail::Trail"
+      ExecutionControls:
+        SsmControls:
+          ConcurrentExecutionRatePercentage: 2
+          ErrorPercentage: 5
+      TargetType: "SSM_DOCUMENT"
+      TargetId: "AWSConfigRemediation-EnableCloudTrailLogFileValidation"
+      TargetVersion: "1"
+      MaximumAutomaticAttempts: 5
+      RetryAttemptSeconds: 60

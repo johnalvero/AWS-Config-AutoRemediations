@@ -96,13 +96,19 @@ Resources:
             - ec2:DescribeSecurityGroups
             - ec2:RevokeSecurityGroupIngress
             - ec2:RevokeSecurityGroupEgress
+            Resource: 'arn:aws:ec2:*:*:*'
+            Effect: Allow
+          - Action:
             - cloudtrail:UpdateTrail
             - cloudtrail:GetTrail
+            Resource: 'arn:aws:cloudtrail:*:*:*'
+            Effect: Allow
+          - Action:
             - kms:ListKeys
             - kms:DescribeKey
             - kms:EnableKeyRotation
             - kms:GetKeyRotationStatus
-            Resource: '*'
+            Resource: 'arn:aws:kms:*:*:*'
             Effect: Allow
   Port22Remediation:
     Type: "AWS::Config::RemediationConfiguration"
@@ -212,8 +218,11 @@ Resources:
                 - Effect: Allow
                   Action:
                     - config:PutEvaluations
+                  Resource: 'arn:aws:config:*:*:*'
+                - Effect: Allow
+                  Action:
                     - ec2:DescribeSecurityGroups
-                  Resource: '*'
+                  Resource: 'arn:aws:ec2:*:*:*'
                 - Effect: Allow
                   Action:
                     - logs:CreateLogGroup
@@ -335,9 +344,11 @@ Resources:
                     - ec2:RevokeSecurityGroupEgress
                     - ec2:AuthorizeSecurityGroupIngress
                     - ec2:DescribeSecurityGroups
+                  Resource: 'arn:aws:ec2:*:*:*'
+                - Effect: Allow
+                  Action:
                     - kms:EnableKeyRotation
-                  Resource: '*'
-
+                  Resource: 'arn:aws:kms:*:*:*'
 
   SecGroupAllAnySSMDocRemediation:
     Type: "AWS::SSM::Document"

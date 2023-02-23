@@ -50,6 +50,13 @@ Parameters:
     AllowedValues:
       - 'Enable'
       - 'Disable'
+  EnableFlowlogsRemediation:
+    Type: String
+    Description: Whether to enable or disable the remediation for flowlogs
+    Default: 'Enable'
+    AllowedValues:
+      - 'Enable'
+      - 'Disable'
 
 Conditions:
   EnablePort22Rem: !Equals
@@ -73,6 +80,9 @@ Conditions:
   EnableCloudTrailValidationRem: !Equals
     - !Ref EnableCloudTrailValidationRemediation
     - 'Enable'
+  EnableFlowlogsRem: !Equals
+    - !Ref EnableFlowlogsRemediation
+    - 'Enable'
 Resources:
   SSMAutomaticRemediationRole:
     Type: AWS::IAM::Role
@@ -93,22 +103,33 @@ Resources:
           Version: '2012-10-17'
           Statement:
           - Action:
-            - ec2:DescribeSecurityGroups
             - ec2:RevokeSecurityGroupIngress
             - ec2:RevokeSecurityGroupEgress
-            Resource: 'arn:aws:ec2:*:*:*'
+            - ec2:CreateFlowLogs
+            Resource: '*'
+            Effect: Allow
+          - Action:
+            - ec2:DescribeSecurityGroups
+            Resource: '*'
             Effect: Allow
           - Action:
             - cloudtrail:UpdateTrail
             - cloudtrail:GetTrail
-            Resource: 'arn:aws:cloudtrail:*:*:*'
+            Resource: '*'
             Effect: Allow
           - Action:
             - kms:ListKeys
             - kms:DescribeKey
             - kms:EnableKeyRotation
             - kms:GetKeyRotationStatus
-            Resource: 'arn:aws:kms:*:*:*'
+            Resource: '*'
+            Effect: Allow
+          - Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            - logs:CreateLogDelivery
+            Resource: "*"
             Effect: Allow
   Port22Remediation:
     Type: "AWS::Config::RemediationConfiguration"
@@ -596,6 +617,46 @@ Resources:
           ErrorPercentage: 5
       TargetType: "SSM_DOCUMENT"
       TargetId: "AWSConfigRemediation-EnableCloudTrailLogFileValidation"
+      TargetVersion: "1"
+      MaximumAutomaticAttempts: 5
+      RetryAttemptSeconds: 60
+
+  FlowLogsRemediation:
+    Type: "AWS::Config::RemediationConfiguration"
+    Condition: EnableFlowlogsRem
+    Properties:
+      ConfigRuleName: "VPCFlowLogsEnabled"
+      Automatic: True
+      Parameters:
+        AutomationAssumeRole:
+          StaticValue:
+            Values: 
+              - !GetAtt SSMAutomaticRemediationRole.Arn
+        VPCIds:
+          ResourceValue:
+            Value: "RESOURCE_ID"
+        LogDestinationType:
+          StaticValue:
+            Values:
+              - "s3"
+        LogDestinationArn:
+          StaticValue:
+            Values: 
+              - "arn:aws:s3:::sm-central-logging-vpcflow-do-not-delete"
+        TrafficType:
+          StaticValue:
+            Values:
+              - "ALL"
+        DeliverLogsPermissionArn:
+          StaticValue:
+            Values: []
+      ResourceType: "AWS::EC2::FlowLog"
+      ExecutionControls:
+        SsmControls:
+          ConcurrentExecutionRatePercentage: 2
+          ErrorPercentage: 5
+      TargetType: "SSM_DOCUMENT"
+      TargetId: "AWS-EnableVPCFlowLogs"
       TargetVersion: "1"
       MaximumAutomaticAttempts: 5
       RetryAttemptSeconds: 60

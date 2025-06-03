@@ -57,6 +57,20 @@ Parameters:
     AllowedValues:
       - 'Enable'
       - 'Disable'
+  EnableS3WritableRemediation:
+    Type: String
+    Description: Whether to enable or disable the remediation for publicly writable S3 bucket
+    Default: 'Enable'
+    AllowedValues:
+      - 'Enable'
+      - 'Disable'
+  EnableMoveIAMUserPermissionToGroupRemediation:
+    Type: String
+    Description: Move IAM User permissions to a group
+    Default: 'Enable'
+    AllowedValues:
+      - 'Enable'
+      - 'Disable'
 
 Conditions:
   EnablePort22Rem: !Equals
@@ -83,6 +97,13 @@ Conditions:
   EnableFlowlogsRem: !Equals
     - !Ref EnableFlowlogsRemediation
     - 'Enable'
+  EnableS3WritableRem: !Equals
+    - !Ref EnableS3WritableRemediation
+    - 'Enable'
+  EnableMoveUserPermissionToGroupRem: !Equals
+    - !Ref EnableMoveIAMUserPermissionToGroupRemediation
+    - 'Enable'
+
 Resources:
   SSMAutomaticRemediationRole:
     Type: AWS::IAM::Role
@@ -131,6 +152,13 @@ Resources:
             - logs:CreateLogDelivery
             Resource: "*"
             Effect: Allow
+          - Action:
+            - s3:PutBucketPublicAccessBlock
+            Resource: arn:aws:s3:::*
+            Effect: Allow
+            Condition:
+              StringEquals:
+                aws:PrincipalAccount: !Ref "AWS::AccountId"
   Port22Remediation:
     Type: "AWS::Config::RemediationConfiguration"
     Condition: EnablePort22Rem
@@ -239,11 +267,11 @@ Resources:
                 - Effect: Allow
                   Action:
                     - config:PutEvaluations
-                  Resource: 'arn:aws:config:*:*:*'
+                  Resource: '*'
                 - Effect: Allow
                   Action:
                     - ec2:DescribeSecurityGroups
-                  Resource: 'arn:aws:ec2:*:*:*'
+                  Resource: '*'
                 - Effect: Allow
                   Action:
                     - logs:CreateLogGroup
@@ -365,7 +393,7 @@ Resources:
                     - ec2:RevokeSecurityGroupEgress
                     - ec2:AuthorizeSecurityGroupIngress
                     - ec2:DescribeSecurityGroups
-                  Resource: 'arn:aws:ec2:*:*:*'
+                  Resource: '*'
                 - Effect: Allow
                   Action:
                     - kms:EnableKeyRotation
@@ -423,7 +451,7 @@ Resources:
             isEnd: true
             timeoutSeconds: 600
             inputs:
-              Runtime: python3.6
+              Runtime: python3.8
               Handler: script_handler
               InputPayload:
                 SecurityGroupIds: '{{SecurityGroupIds}}'
@@ -449,6 +477,7 @@ Resources:
                       sg_description = ec2_client.describe_security_groups(GroupIds=[sg_id])
                       sg_resource = ec2_resource.SecurityGroup(sg_id)
                       has_unrestricted, unrestricted_ipv4_ranges = find_open_sg(sg_description)
+                      has_unrestricted_tcp, unrestricted_ipv4_ranges_tcp = find_open_sg_tcp(sg_description)
                       
                       if has_unrestricted:
                         update_response = sg_resource.revoke_ingress(
@@ -469,12 +498,32 @@ Resources:
                         DryRun=False
                         )
                         
-                        
                         if update_response and 'Return' in update_response and update_response['Return']:
                           Restricted_sg_ids.append(sg_id)
                         else:
                           successful = False
                           Unrestricted_sg_ids.append(sg_id)
+
+                      if has_unrestricted_tcp:
+                        security_group = ec2_client.describe_security_groups(GroupIds=[currentSg])['SecurityGroups'][0]
+
+                        for rule in security_group['IpPermissions']:
+                          if (rule.get('IpProtocol') == 'tcp'):
+                              for IpRange in rule.get('IpRanges'):
+                                  try:
+                                      rDescription = IpRange['Description']
+                                  except:
+                                      rDescription = 'xxx'
+                                  if rDescription != 'OKAY' and IpRange['CidrIp'] == '0.0.0.0/0' and (rule.get('FromPort') <= 22 <= rule.get('ToPort') or (rule.get('FromPort') <= 3389 <= rule.get('ToPort'))):
+                                    revoke_tcp_response = ec2_client.revoke_security_group_ingress(
+                                        GroupId=currentSg,
+                                        IpPermissions=[rule]
+                                    )
+                                    if revoke_tcp_response['ResponseMetadata']['HTTPStatusCode'] == 200:
+                                      Restricted_sg_ids.append(sg_id)
+                                    else:
+                                      successful = False
+                                      Unrestricted_sg_ids.append(sg_id)
 
                   except Exception as e:
                     errorMsg = str(e)
@@ -494,7 +543,6 @@ Resources:
                   has_unrestricted = False
                   unrestricted_ipv4_ranges = []
 
-
                   for rule in sg_description["SecurityGroups"][0]['IpPermissions']:
                       if (rule.get('IpProtocol') == '-1'):
                           for IpRange in rule.get('IpRanges'):
@@ -503,6 +551,22 @@ Resources:
                               except:
                                   rDescription = 'xxx'
                               if rDescription != 'OKAY' and IpRange['CidrIp'] == '0.0.0.0/0':
+                                  unrestricted_ipv4_ranges.append(IpRange)
+                                  has_unrestricted = True
+                  return has_unrestricted, unrestricted_ipv4_ranges
+
+                def find_open_sg_tcp(sg_description):
+                  has_unrestricted = False
+                  unrestricted_ipv4_ranges = []
+
+                  for rule in sg_description["SecurityGroups"][0]['IpPermissions']:
+                      if (rule.get('IpProtocol') == 'tcp'):
+                          for IpRange in rule.get('IpRanges'):
+                              try:
+                                  rDescription = IpRange['Description']
+                              except:
+                                  rDescription = 'xxx'
+                              if rDescription != 'OKAY' and IpRange['CidrIp'] == '0.0.0.0/0' and (rule.get('FromPort') <= 22 <= rule.get('ToPort') or (rule.get('FromPort') <= 3389 <= rule.get('ToPort'))):
                                   unrestricted_ipv4_ranges.append(IpRange)
                                   has_unrestricted = True
                   return has_unrestricted, unrestricted_ipv4_ranges
@@ -658,5 +722,204 @@ Resources:
       TargetType: "SSM_DOCUMENT"
       TargetId: "AWS-EnableVPCFlowLogs"
       TargetVersion: "1"
+      MaximumAutomaticAttempts: 5
+      RetryAttemptSeconds: 60
+
+  PublicWriteS3ConfigRule:
+    Type: 'AWS::Config::ConfigRule'
+    Condition: EnableS3WritableRem
+    Properties:
+      Description: 'Checks whether any S3 buckets allow public write access.'
+      InputParameters: '{}'
+      Scope:
+        ComplianceResourceTypes:
+          - 'AWS::S3::Bucket'
+      Source:
+        Owner: AWS
+        SourceIdentifier: S3_BUCKET_PUBLIC_WRITE_PROHIBITED
+
+  PublicWriteS3Remediation:
+    Type: "AWS::Config::RemediationConfiguration"
+    Condition: EnableS3WritableRem
+    Properties:
+      ConfigRuleName: !Ref PublicWriteS3ConfigRule
+      Automatic: True
+      Parameters:
+        AutomationAssumeRole:
+          StaticValue:
+            Values: 
+              - !GetAtt SSMAutomaticRemediationRole.Arn
+        S3BucketName:
+          ResourceValue:
+            Value: "RESOURCE_ID"
+      ResourceType: "AWS::S3::Bucket"
+      ExecutionControls:
+        SsmControls:
+          ConcurrentExecutionRatePercentage: 2
+          ErrorPercentage: 5
+      TargetType: "SSM_DOCUMENT"
+      TargetId: "AWS-DisableS3BucketPublicReadWrite"
+      TargetVersion: "1"
+      MaximumAutomaticAttempts: 5
+      RetryAttemptSeconds: 60
+
+  ## Resources related to automatically moving IAM permissions to groups
+  MoveUserPermissionToGroupRole:
+    Type: AWS::IAM::Role
+    Condition: EnableMoveUserPermissionToGroupRem
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Action: 'sts:AssumeRole'
+          Effect: Allow
+          Principal:
+            Service:
+            - ssm.amazonaws.com
+          Sid: ''
+      Path: '/'
+      Policies:
+      - PolicyName: 'cis-moveuserpermissiontogroup'
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Action:
+            - iam:CreatePolicy
+            - iam:CreateGroup
+            - iam:AddUserToGroup
+            - iam:GetUserPolicy
+            - iam:AttachGroupPolicy
+            - iam:ListAttachedUserPolicies
+            - iam:DeleteUserPolicy
+            - iam:ListUserPolicies
+            - DetachUserPolicy
+            - ListUsers
+            Resource: '*'
+            Effect: Allow
+            Condition:
+              StringEquals:
+                aws:PrincipalAccount: !Ref "AWS::AccountId"
+
+  MoveUserPermissionToGroup:
+    Type: "AWS::SSM::Document"
+    Condition: EnableMoveUserPermissionToGroupRem
+    Properties:
+      DocumentType: "Automation"
+      Content: 
+        description: |+
+          #### Document Name - Move IAM User Permission to Group
+
+          ## This automation document will move IAM users with directly attached permission (either via managed policy or inline) to a group
+          ## with the following convention:
+          ##
+          ## <username>-auto-newgroup
+        schemaVersion: '0.3'
+        description: |
+          This automation document will move IAM users with directly attached permission (either via managed policy or inline) to a group
+        assumeRole: '{{AutomationAssumeRole}}'
+        parameters:
+          AutomationAssumeRole:
+            default: ''
+            type: String
+            allowedPattern: ^arn:aws(-cn|-us-gov)?:iam::\d{12}:role\/[\w+=,.@_\/-]+|^$
+          IAMUser:
+            type: String
+        mainSteps:
+          - name: step1
+            action: aws:executeScript
+            timeoutSeconds: 600
+            isCritical: true
+            isEnd: true
+            onFailure: Abort
+            inputs:
+              Script: |
+                import boto3
+                import re
+                import json
+                import random
+
+                def get_username_by_userid(user_id):
+                    iam_client = boto3.client('iam')
+
+                    response = iam_client.list_users()
+                    users = response.get('Users', [])
+
+                    for user in users:
+                        if user.get('UserId') == user_id:
+                            return user.get('UserName')
+                    return None
+
+                def script_handler(event,context):
+                    iam_client = boto3.client('iam')
+                    username = get_username_by_userid(event["IAMUser"])
+
+                    # Create a new group name based on the pattern
+                    new_group_name = f"{username}-auto-newgroup"
+
+                    try:
+                        # Create the new group
+                        try:
+                            iam_client.create_group(GroupName=new_group_name)
+                            iam_client.add_user_to_group(UserName=username, GroupName=new_group_name)
+                            print(f"Created new group: {new_group_name}")
+                        except iam_client.exceptions.EntityAlreadyExistsException:
+                            print(f"Group {new_group_name} already exists. Skipping group creation.")
+
+                        # List attached policies for the user
+                        attached_policies = iam_client.list_attached_user_policies(UserName=username)['AttachedPolicies']
+
+                        # List inline policies for the user
+                        inline_policies = iam_client.list_user_policies(UserName=username)['PolicyNames']
+
+                        # Detach attached policies from the user
+                        for policy in attached_policies:
+                            policy_arn = policy['PolicyArn']
+                            try:
+                                iam_client.detach_user_policy(UserName=username, PolicyArn=policy_arn)
+                                iam_client.attach_group_policy(GroupName=new_group_name, PolicyArn=policy_arn)
+                                print(f"Detached policy {policy_arn} from {username} and attached to {new_group_name}")
+                            except Exception as e:
+                                print(f"Error attaching policy {policy_arn}: {e}")
+
+                        # Detach and move inline policies to the new group
+                        for policy_name in inline_policies:
+                            random_number = random.randint(1, 1000)
+                            new_policy_name = f"{policy_name}-auto-{random_number}"
+
+                            policy_document = iam_client.get_user_policy(UserName=username, PolicyName=policy_name)['PolicyDocument']
+                            policy_doc = json.dumps(policy_document)
+                            try:
+                                iam_client.delete_user_policy(UserName=username, PolicyName=policy_name)
+                                new_policy = iam_client.create_policy(PolicyName=new_policy_name, PolicyDocument=policy_doc)
+                                iam_client.attach_group_policy(GroupName=new_group_name, PolicyArn=new_policy['Policy']['Arn'])
+                                print(f"Deleted inline policy {policy_name} from {username}, created new policy, and attached to {new_group_name}")
+                            except Exception as e:
+                                print(f"Error handling inline policy {policy_name}: {e}")
+
+                    except Exception as e:
+                        print(f"Error: {e}")
+                        raise e
+              Runtime: python3.8
+              InputPayload:
+                IAMUser: '{{IAMUser}}'
+              Handler: script_handler
+
+  MoveUserPermissionToGroupRemediationConfiguration:
+    Type: AWS::Config::RemediationConfiguration
+    Condition: EnableMoveUserPermissionToGroupRem
+    Properties:
+      ConfigRuleName: "IAMUserNoPoliciesCheck"
+      TargetType: "SSM_DOCUMENT"
+      TargetId: !Ref MoveUserPermissionToGroup
+      TargetVersion: '$LATEST'
+      Parameters:
+        AutomationAssumeRole:
+          StaticValue:
+            Values:
+              - !GetAtt MoveUserPermissionToGroupRole.Arn
+        IAMUser:
+          ResourceValue:
+            Value: RESOURCE_ID
+      Automatic: true
       MaximumAutomaticAttempts: 5
       RetryAttemptSeconds: 60
